@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>TeleReh-AI</title>
+<style>
+:root{--bg:#f3f6f8;--card:#fff;--text:#18222d;--muted:#687582;--ok:#20a464;--warn:#e7a21a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}
+header{height:68px;background:#fff;border-bottom:1px solid #e2e6ea;display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:sticky;top:0;z-index:5}
+.logo{font-size:24px;font-weight:800}.score{font-size:22px}
+.layout{max-width:1200px;margin:18px auto;padding:0 14px;display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:16px}
+.card{background:var(--card);border-radius:20px;box-shadow:0 4px 18px #18222d14;overflow:hidden}
+.camera{position:relative;background:#101418;aspect-ratio:16/10;min-height:360px}
+video,#poseCanvas{position:absolute;width:100%;height:100%;left:0;top:0;object-fit:cover;transform:scaleX(-1)}
+#poseCanvas{pointer-events:none}.guide{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;text-align:center;background:#101418aa;z-index:2}
+.hidden{display:none!important}
+.status{text-align:center;padding:15px 10px 3px;font-size:26px;font-weight:800}.instruction{text-align:center;padding:5px 16px 16px;font-size:17px;color:var(--muted)}
+.info{display:flex;justify-content:center;gap:22px;flex-wrap:wrap;padding:0 14px 18px}.pill{padding:10px 14px;background:#f1f4f6;border-radius:14px;font-weight:700}
+.side{display:flex;flex-direction:column;gap:12px}.btn{border:0;background:#fff;border-radius:17px;padding:16px 8px;font-size:16px;font-weight:800;box-shadow:0 4px 15px #18222d12;cursor:pointer;color:var(--text)}.btn:active{transform:scale(.98)}
+.btn.primary{background:#18222d;color:#fff}.btn.big{font-size:19px}
+.panel{margin-top:16px;padding:18px}.panel h3{margin:0 0 10px}.progress{height:14px;background:#e7ecef;border-radius:20px;overflow:hidden}.fill{height:100%;width:0;background:var(--ok);transition:.3s}
+@media(max-width:760px){.layout{grid-template-columns:1fr 78px}.camera{min-height:260px}.btn{font-size:12px;padding:12px 4px}.status{font-size:21px}.instruction{font-size:14px}.score{font-size:18px}.logo{font-size:20px}}
+</style>
+</head>
+<body>
+<header><div class="logo">TeleReh-AI</div><div class="score">🏅 <span id="medals">0</span> &nbsp; 🏆 <span id="cups">0</span></div></header>
+
+<div class="layout">
+<section>
+<div class="card">
+<div class="camera">
+<video id="video" autoplay playsinline muted></video>
+<canvas id="poseCanvas"></canvas>
+<div class="guide" id="guide">📷<br><br>Kamerayı başlatmak için<br><b>Başlat</b>'a dokun.</div>
+</div>
+<div class="status" id="status">Hazır</div>
+<div class="instruction" id="instruction">Kamerayı aç ve egzersizi başlat.</div>
+<div class="info">
+<div class="pill">📐 Açı: <span id="angle">—</span></div>
+<div class="pill">🎯 Hedef: <span id="target">90°</span></div>
+<div class="pill">💪 Egzersiz: <span id="exercise">Kol bükme</span></div>
+</div>
+</div>
+
+<div class="card panel">
+<h3>Bugünkü egzersizler: <span id="count">0</span> / 3</h3>
+<div class="progress"><div class="fill" id="fill"></div></div>
+</div>
+</section>
+
+<aside class="side">
+<button class="btn primary big" id="start">▶️<br>Başlat</button>
+<button class="btn" id="speak">🔊<br>Ses</button>
+<button class="btn" id="complete">✓<br>Tamamla</button>
+<button class="btn" id="reward">🏅<br>Ödül</button>
+<button class="btn" id="reset">↻<br>Sıfırla</button>
+</aside>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+<script>
+const video=document.getElementById('video'), canvas=document.getElementById('poseCanvas'), ctx=canvas.getContext('2d');
+const guide=document.getElementById('guide'), statusEl=document.getElementById('status'), instruction=document.getElementById('instruction');
+const angleEl=document.getElementById('angle'), countEl=document.getElementById('count'), fill=document.getElementById('fill');
+let running=false, voice=true, done=0, good=0, lastSpeak=0, camera=null;
+
+function say(t){if(!voice||Date.now()-lastSpeak<2200)return;lastSpeak=Date.now();if('speechSynthesis'in window){speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(t))}}
+function angle(a,b,c){let ab={x:a.x-b.x,y:a.y-b.y},cb={x:c.x-b.x,y:c.y-b.y};let dot=ab.x*cb.x+ab.y*cb.y;let den=Math.hypot(ab.x,ab.y)*Math.hypot(cb.x,cb.y);return Math.acos(Math.max(-1,Math.min(1,dot/den)))*180/Math.PI}
+function onResults(r){
+ if(!running)return;
+ canvas.width=video.videoWidth||640;canvas.height=video.videoHeight||400;ctx.clearRect(0,0,canvas.width,canvas.height);
+ if(!r.poseLandmarks){statusEl.textContent='🟠 Kişi algılanamadı';instruction.textContent='Kameraya biraz daha yaklaş.';return}
+ drawConnectors(ctx,r.poseLandmarks,POSE_CONNECTIONS,{color:'#ffffff',lineWidth:5});
+ drawLandmarks(ctx,r.poseLandmarks,{color:'#ffffff',lineWidth:2,radius:5});
+ const L= r.poseLandmarks;
+ const shoulder=L[11], elbow=L[13], wrist=L[15];
+ if(shoulder&&elbow&&wrist){
+   const deg=Math.round(angle(shoulder,elbow,wrist)); angleEl.textContent=deg+'°';
+   const ok=Math.abs(deg-90)<=10;
+   if(ok){statusEl.textContent='🟢 HAREKET DOĞRU';instruction.textContent='Harika! Pozisyonu koru.';good++;say('Hareket doğru.');}
+   else if(deg<80){statusEl.textContent='🟠 KOLUNU BİRAZ DAHA AÇ';instruction.textContent='Dirseğini biraz daha düzleştir.';say('Kolunu biraz daha aç.');}
+   else {statusEl.textContent='🟠 KOLUNU BİRAZ DAHA BÜK';instruction.textContent='Dirseğini biraz daha bük.';say('Kolunu biraz daha bük.');}
+ }
+}
+const pose=new Pose({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`});
+pose.setOptions({modelComplexity:1,smoothLandmarks:true,enableSegmentation:false,minDetectionConfidence:.6,minTrackingConfidence:.6});
+pose.onResults(onResults);
+
+async function start(){
+ try{
+  const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}},audio:false});
+  video.srcObject=stream;await video.play();guide.classList.add('hidden');running=true;statusEl.textContent='🟢 HAZIR';instruction.textContent='Kollarını kameraya doğru göster.';say('Egzersize başlayabilirsin.');
+  if(!camera){camera=new Camera(video,{onFrame:async()=>await pose.send({image:video}),width:1280,height:720});camera.start();}
+ }catch(e){statusEl.textContent='🔴 Kamera açılamadı';instruction.textContent='Tarayıcıda kamera izni vermen gerekiyor.'}
+}
+document.getElementById('start').onclick=start;
+document.getElementById('speak').onclick=()=>{voice=!voice;document.getElementById('speak').innerHTML=voice?'🔊<br>Ses':'🔇<br>Ses';if(voice)say('Sesli yönlendirme açık.')}
+document.getElementById('complete').onclick=()=>{
+ if(done<3)done++;
+ countEl.textContent=done;fill.style.width=(done/3*100)+'%';
+ if(done===3){statusEl.textContent='🏅 GÜN TAMAMLANDI';instruction.textContent='Harika! Bugünkü egzersizlerini eksiksiz tamamladın.';let m=+localStorage.getItem('medals')||0;localStorage.setItem('medals',m+1);document.getElementById('medals').textContent=m+1;say('Harika. Bugünkü egzersiz tamamlandı.');}
+ else {statusEl.textContent='🟢 TAMAMLANDI';instruction.textContent='Sıradaki egzersize geçebilirsin.'}
+}
+document.getElementById('reward').onclick=()=>{
+ let m=+localStorage.getItem('medals')||0,c=+localStorage.getItem('cups')||0;
+ if(done===3)alert('🏅 Günlük madalya kazandın!\\n\\n7 gün üst üste tamamladığında 🏆 kupa kazanırsın.');
+ else alert('Bugünkü 3 egzersizi tamamla, madalyanı kazan!');
+}
+document.getElementById('reset').onclick=()=>{done=0;countEl.textContent='0';fill.style.width='0%';statusEl.textContent='Hazır';instruction.textContent='Kamerayı aç ve egzersizi başlat.';angleEl.textContent='—';}
+document.getElementById('medals').textContent=localStorage.getItem('medals')||0;
+document.getElementById('cups').textContent=localStorage.getItem('cups')||0;
+</script>
+</body>
+</html>
